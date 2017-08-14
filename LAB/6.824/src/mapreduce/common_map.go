@@ -1,7 +1,12 @@
 package mapreduce
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
 	"hash/fnv"
+	"io/ioutil"
+	"os"
 )
 
 // doMap manages one map task: it reads one of the input files
@@ -53,6 +58,24 @@ func doMap(
 	//
 	// Remember to close the file after you have written all the values!
 	//
+	buf, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		fmt.Fprinf(os.Stderr, "File Error:%s\n",err)
+	}
+	
+	mapped := mapF(inFile, buf)
+
+	files := make([]*os.File, 0)
+	var file *os.File
+	for i := 0; i < nReduce; i++ {
+		outputFile := reduceName(jobName, mapTaskNumber, i)
+		file, _ = os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		files = append(files, file)
+		defer file.Close()
+	}
+	r := ihash(kv.key)/nReduce
+	enc := json.NewEncoder(files[r])
+	err := enc.Encode(mapped)
 }
 
 func ihash(s string) int {

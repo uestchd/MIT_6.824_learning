@@ -52,7 +52,7 @@ func newMaster(master string) (mr *Master) {
 	mr.shutdown = make(chan struct{})
 	mr.newCond = sync.NewCond(mr)
 	mr.doneChannel = make(chan bool)
-	return
+	return mr
 }
 
 // Sequential runs map and reduce tasks sequentially, waiting for each task to
@@ -76,7 +76,7 @@ func Sequential(jobName string, files []string, nreduce int,
 	}, func() {
 		mr.stats = []int{len(files) + nreduce}
 	})
-	return
+	return mr
 }
 
 // helper function that sends information about all existing

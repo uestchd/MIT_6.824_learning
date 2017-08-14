@@ -43,4 +43,13 @@ func doReduce(
 	// }
 	// file.Close()
 	//
+	files := make([]*os.File, 0)
+	var file *os.File
+	for i:= 0; i < nMap ; i++ {
+		inputFile := reduceName(jobName, i, reduceTaskNumber)
+		file, _ = os.OpenFile(outputFile, os.O_CREATE|os.O_RDWR, 0666)
+		files = append(files, file)
+		defer file.Close()
+	}
+
 }
