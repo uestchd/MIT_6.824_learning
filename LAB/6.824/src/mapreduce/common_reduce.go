@@ -43,11 +43,11 @@ func doReduce(
 	// }
 	// file.Close()
 	//
-	word := make([]string)
+	word := make(map[string]string)
 	for i:= 0; i < nMap ; i++ {
 		inputFile := reduceName(jobName, i, reduceTaskNumber)
 		file, _ := os.Open(inputFile)
-		var tmp KeyValue
+		var tmp []KeyValue
 		dec := json.NewDecoder(file)
 		err := dec.Decode(&tmp)
 		if err != nil {
@@ -55,10 +55,14 @@ func doReduce(
 			return
 		}
 
-		for i, j := range tmp {
-			
+		for i, kv := range tmp {
+			word[kv.Key] += kv.Value
 		}
 
 		defer file.Close()
+	}
+
+	for k, v := range word {
+		reduceF()
 	}
 }
