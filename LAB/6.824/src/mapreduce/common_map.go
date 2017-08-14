@@ -63,7 +63,7 @@ func doMap(
 		fmt.Fprinf(os.Stderr, "File Error:%s\n",err)
 	}
 	
-	mapped := mapF(inFile, buf)
+	res := mapF(inFile, buf)
 
 	files := make([]*os.File, 0)
 	var file *os.File
@@ -73,9 +73,16 @@ func doMap(
 		files = append(files, file)
 		defer file.Close()
 	}
-	r := ihash(kv.key)/nReduce
-	enc := json.NewEncoder(files[r])
-	err := enc.Encode(mapped)
+
+	for _, kv := range res {
+		r := ihash(kv.Key)/nReduce
+		enc := json.NewEncoder(files[r])
+		err := enc.Encode(kv)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
 }
 
 func ihash(s string) int {

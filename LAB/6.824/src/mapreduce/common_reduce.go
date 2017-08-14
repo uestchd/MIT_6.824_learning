@@ -43,13 +43,22 @@ func doReduce(
 	// }
 	// file.Close()
 	//
-	files := make([]*os.File, 0)
-	var file *os.File
+	word := make([]string)
 	for i:= 0; i < nMap ; i++ {
 		inputFile := reduceName(jobName, i, reduceTaskNumber)
-		file, _ = os.OpenFile(outputFile, os.O_CREATE|os.O_RDWR, 0666)
-		files = append(files, file)
+		file, _ := os.Open(inputFile)
+		var tmp KeyValue
+		dec := json.NewDecoder(file)
+		err := dec.Decode(&tmp)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		for i, j := range tmp {
+			
+		}
+
 		defer file.Close()
 	}
-
 }
