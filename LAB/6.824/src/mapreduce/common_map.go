@@ -1,7 +1,6 @@
 package mapreduce
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -60,10 +59,10 @@ func doMap(
 	//
 	buf, err := ioutil.ReadFile(inFile)
 	if err != nil {
-		fmt.Fprinf(os.Stderr, "File Error:%s\n",err)
+		fmt.Fprintf(os.Stderr, "File Error:%s\n",err)
 	}
 	
-	res := mapF(inFile, buf)
+	res := mapF(inFile, string(buf))
 
 	files := make([]*os.File, 0)
 	var file *os.File
@@ -75,9 +74,9 @@ func doMap(
 	}
 
 	for _, kv := range res {
-		r := ihash(kv.Key)/nReduce
+		r := ihash(kv.Key)%nReduce
 		enc := json.NewEncoder(files[r])
-		err := enc.Encode(kv)
+		err := enc.Encode(&kv)
 		if err != nil {
 			fmt.Println(err)
 			return
