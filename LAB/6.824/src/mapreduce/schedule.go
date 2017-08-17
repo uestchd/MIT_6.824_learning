@@ -35,13 +35,20 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
-	var mu_wk sync.Mutex
+	// Initial mutex lock on workers
 	workers := make([]string, 0)
-	for i := 0; i < 2; i++ {
-		wk := <- registerChan
-		workers = append(workers, wk)
-		fmt.Printf("New worker registered: ", wk)
-	}
+	var mutex sync.Mutex
+	cond_work := sync.NewCond(&mutex)
+	go func(ch chan string) {
+		for {
+			wk := <- ch
+			mutex.Lock()
+			workers = append(workers, wk)
+			fmt.Printf("New worker registered: ", wk)
+			cond_work.Broadcast()
+			mutex.Unlock()
+		}
+	}(registerChan)
 	
 	var wg sync.WaitGroup
 	for i := 0; i < ntasks; i++ {
@@ -52,16 +59,26 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		args.Phase = phase
 		args.TaskNumber = i
 		args.NumOtherPhase = n_other
-		j := i % 2
-		go func(index int){
+		go func(taskid int){
 			defer wg.Done()
-			mu_wk.Lock()
-			ok := call(workers[index], "Worker.DoTask", args, new(struct{}))
-			if ok == false {
-				fmt.Printf("DoTask: RPC %s call error\n", workers[index])
+			for {
+				mutex.Lock()
+				if len(workers) == 0 {
+					fmt.Printf("worker number == 0, wait for connecting...\n")
+					cond_work.Wait()
+				}
+				taskid = taskid % len(workers)
+				ok := call(workers[taskid], "Worker.DoTask", args, new(struct{}))
+				if ok == false {
+					fmt.Printf("DoTask: RPC %s call error, change to another worker\n", workers[taskid])
+					taskid++
+				} else {
+					mutex.Unlock()
+					break
+				}
+				mutex.Unlock()
 			}
-			mu_wk.Unlock()
-		}(j)	
+		}(i)	
 	}
 	wg.Wait()
 	fmt.Printf("Schedule: %v phase done\n", phase)
