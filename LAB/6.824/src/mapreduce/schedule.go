@@ -53,15 +53,15 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		args.TaskNumber = i
 		args.NumOtherPhase = n_other
 		j := i % 2
-		go func(){
+		go func(index int){
 			defer wg.Done()
 			mu_wk.Lock()
-			ok := call(workers[j], "Worker.DoTask", args, new(struct{}))
+			ok := call(workers[index], "Worker.DoTask", args, new(struct{}))
 			if ok == false {
-				fmt.Printf("DoTask: RPC %s call error\n", workers[j])
+				fmt.Printf("DoTask: RPC %s call error\n", workers[index])
 			}
 			mu_wk.Unlock()
-		}()	
+		}(j)	
 	}
 	wg.Wait()
 	fmt.Printf("Schedule: %v phase done\n", phase)
