@@ -32,17 +32,22 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
-	worker := <- registerChan
+	for i:=0; i < 2; i++ {
+		worker := <- registerChan
+	}
+	
 	fmt.Printf("New worker registered: ", worker)
-	args := new(DoTaskArgs)
-	args.JobName = jobName
-	args.File = 
-	args.Phase = phase
-	args.TaskNumber = 
-	args.NumOtherPhase = n_other
-	ok := call(worker, "Worker.DoTask", args, new(struct{}))
-	if ok == false {
-		fmt.Printf("DoTask: RPC %s call error\n", worker)
+	for i, file := range mapFiles {
+		args := new(DoTaskArgs)
+		args.JobName = jobName
+		args.File = file
+		args.Phase = phase
+		args.TaskNumber = i
+		args.NumOtherPhase = n_other
+		ok := call(worker, "Worker.DoTask", args, new(struct{}))
+		if ok == false {
+			fmt.Printf("DoTask: RPC %s call error\n", worker)
+		}
 	}
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
