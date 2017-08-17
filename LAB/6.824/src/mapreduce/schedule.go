@@ -35,6 +35,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
+	var mu_wk sync.Mutex
 	workers := make([]string, 0)
 	for i := 0; i < 2; i++ {
 		wk := <- registerChan
@@ -54,10 +55,12 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		j := i % 2
 		go func(){
 			defer wg.Done()
+			mu_wk.Lock()
 			ok := call(workers[j], "Worker.DoTask", args, new(struct{}))
 			if ok == false {
 				fmt.Printf("DoTask: RPC %s call error\n", workers[j])
 			}
+			mu_wk.Unlock()
 		}()	
 	}
 	wg.Wait()
