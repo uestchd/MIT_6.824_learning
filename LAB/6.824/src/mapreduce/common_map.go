@@ -68,7 +68,7 @@ func doMap(
 	var file *os.File
 	for i := 0; i < nReduce; i++ {
 		outputFile := reduceName(jobName, mapTaskNumber, i)
-		file, _ = os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		file, _ = os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY, 0666)
 		files = append(files, file)
 		defer file.Close()
 	}
