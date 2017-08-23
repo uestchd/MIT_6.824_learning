@@ -41,8 +41,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	var mutex sync.Mutex
 	cond_work := sync.NewCond(&mutex)
 	go func() {
-		for {
-			wk := <- registerChan
+		for wk := range registerChan {
 			fmt.Println("New worker comes")
 			newWorker = true
 			mutex.Lock()
