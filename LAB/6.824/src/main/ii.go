@@ -30,9 +30,13 @@ func reduceF(key string, values []string) string {
 	var r string
 	tmp := make(map[string]bool)
 	for _, data := range values {
-		if tmp[data] == true {
-			/*...*/
+		/*if tmp[data] == true {
+			
 		} else {
+			tmp[data] = true
+			res = append(res, data)
+		}*/
+		if _, ok := tmp[data]; !ok {
 			tmp[data] = true
 			res = append(res, data)
 		}
