@@ -37,6 +37,11 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+type entry struct {
+	term       int
+	command    interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -50,6 +55,18 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	/*persistent state*/
+	currentTerm   int
+	votedFor      int
+	log           entry
+
+	/*volatile state on all servers*/
+	commitIndex   int
+	lastApplied   int
+
+	/*volatile state on leaders*/
+	nextIndex[]   int
+	matchIndex[]  int
 }
 
 // return currentTerm and whether this server
@@ -93,8 +110,32 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
+type AppendEntriesArgs struct {
+	Term           int
+	LeaderId       int
+	PrevLogIndex   int
+	PrevLogTerm    int
+	Entries        []entry
+	LeaderCommit   int
+}
 
+type AppendEntriesreply struct {
+	Term      int
+	Success   bool
+}
 
+func (rf *raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply) {
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+	}
+
+	/*if success*/
+	rf.mu.lock()
+	rf.newCond.Broadcast()
+	rf.mu.unlock()
+	return nil
+}
 
 //
 // example RequestVote RPC arguments structure.
@@ -102,6 +143,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term           int
+	CandidateId    int
+	LastLogIndex   int
+	LastLogTerm    int
 }
 
 //
@@ -110,6 +155,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term          int
+	VoteGranted   int
 }
 
 //
@@ -117,6 +164,14 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if rf.currentTerm > args.Term {
+		reply.VoteGranted = false
+	} else if (rf.votedFor == nil || rf.votedFor == args.CandidateId) 
+				&& (args.LastLogIndex == && args.LastLogTerm == ) {
+		reply.VoteGranted = true
+	}
+	reply.Term = rf.currentTerm
+	return nil
 }
 
 //
@@ -211,6 +266,43 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go func(){
+		/*Set timer for later election*/
+		rand.Seed(time.Now().UTC().UnixNano())
+		for {
+			/*As requested, we start a timer every time a new election*/
+			go func(){
+				/*A thread for receiving AppendEntries*/
+				}()
+			d := rand.Int(150) + 150
+			time.Sleep(time.Duration(d) * time.Millisecond)
+
+			/*Timer expired*/
+			for i, _ := range rf.peers {
+				if (i == rf.me) {
+					continue
+				}
+				request := new(RequestVoteArgs)
+				rf.currentTerm++
+				request.Term = rf.currentTerm
+				request.CandidateId = me
+				request.LastLogIndex = len(rf.log)
+				request.LastLogTerm = rf.log.term
+				reply := new(RequestVoteReply)
+				ok := rf.sendRequestVote(i, request, reply)
+				if ok {
+					/*relied*/
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term						
+					}
+					if reply.VoteGranted {
+					}
+				} else {
+					fmt.Println("refused in voting")
+				}
+			}
+		}
+	}()
 
 	return rf
 }
