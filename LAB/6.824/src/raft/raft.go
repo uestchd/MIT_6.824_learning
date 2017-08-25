@@ -55,6 +55,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	rpcCond       *sync.Cond
+	isLeader      bool
+	isCandidate   bool
+	voteReq       bool
 	/*persistent state*/
 	currentTerm   int
 	votedFor      int
@@ -125,15 +129,16 @@ type AppendEntriesreply struct {
 }
 
 func (rf *raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply) {
+	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	}
 
 	/*if success*/
-	rf.mu.lock()
-	rf.newCond.Broadcast()
-	rf.mu.unlock()
+	rf.voteReq = true
+	rf.rpcCond.Broadcast()
+	rf.mu.Unlock()
 	return nil
 }
 
@@ -164,6 +169,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
 	} else if (rf.votedFor == nil || rf.votedFor == args.CandidateId) 
@@ -171,6 +177,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 	}
 	reply.Term = rf.currentTerm
+	rf.voteReq = true
+	rf.rpcCond.Broadcast()
+	rf.mu.Unlock()
 	return nil
 }
 
@@ -266,40 +275,139 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.rpcCond = sync.NewCond(&rf.mu)
+	rf.voteReq = false
+	isFollower := true
+	isCandidate := false
+	isLeader := false
 	go func(){
-		/*Set timer for later election*/
-		rand.Seed(time.Now().UTC().UnixNano())
+		/*define a timer for election*/
+		// rand.Seed(time.Now().UTC().UnixNano())
+		var t *time.Timer
+		d := rand.Int(150) + 150
 		for {
 			/*As requested, we start a timer every time a new election*/
+			expired := false
+			t = time.NewTimer(time.Duration(d))
 			go func(){
-				/*A thread for receiving AppendEntries*/
-				}()
-			d := rand.Int(150) + 150
-			time.Sleep(time.Duration(d) * time.Millisecond)
+				/*A helping thread for self-judging to be a follower or a 
+				  candidate based on the accepted event of a vote request
+				  or a timer expired*/
+				<- t.C
+				rf.mu.Lock()
+				expired = true
+				rf.rpcCond.Broadcast()
+				rf.mu.Unlock()
+			}()
+			//time.Sleep(time.Duration(d) * time.Millisecond)
+			/*Timer expired without receiving AppendEntries from others*/
+			rf.mu.Lock()
+			for !rf.voteReq && !expired{
+				rf.rpcCond.Wait()
+			}
 
-			/*Timer expired*/
-			for i, _ := range rf.peers {
-				if (i == rf.me) {
-					continue
+			if rf.voteReq {
+				isFollower = true
+				if !t.stop() {
+					<- t.C
 				}
-				request := new(RequestVoteArgs)
+				rf.voteReq = false
+			} else if expired {
+				isFollower = false
+				isCandidate = true
+				expired = false
+			}
+			rf.mu.Unlock()
+
+			/*if it is a candidate, wait for the empty entries for */
+			if isCandidate {
+				/*start the election*/
 				rf.currentTerm++
-				request.Term = rf.currentTerm
-				request.CandidateId = me
-				request.LastLogIndex = len(rf.log)
-				request.LastLogTerm = rf.log.term
-				reply := new(RequestVoteReply)
-				ok := rf.sendRequestVote(i, request, reply)
-				if ok {
-					/*relied*/
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term						
+				rf.votedFor = me
+				t.Reset(time.Duration(d))
+				go func(){
+					<- t.C
+					expired = true
+					rf.rpcCond.Broadcast()
+				}()
+
+				quit := make(ch bool)
+				go func(q ch) {
+					for {
+						go func(){
+							rf.mu.Lock()
+
+							rf.mu.Unlock()
+							}()
+						<- q
+						break
 					}
-					if reply.VoteGranted {
-					}
-				} else {
-					fmt.Println("refused in voting")
+				}(quit)
+
+				rf.mu.Lock()
+				for !rf.voteReq && !isLeader && !expired {
+					rf.rpcCond.Wait()
 				}
+				if rf.voteReq {
+					isFollower = true
+					isLeader = false
+					if !t.stop() {
+						<- t.C
+					}
+					rf.voteReq = false
+				} else if expired {
+					isFollower = true
+					isLeader = false
+				} else if isLeader {
+					isFollower = false
+					break
+				}
+				isCandidate = false
+				rf.mu.Unlock()
+
+
+				/*send RequestVote RPCs to all other servers*/
+				votedSum := 0
+				var wg sync.WaitGroup
+				for i, _ := range rf.peers {
+					if (i == rf.me) {
+						continue
+					}
+
+					wg.Add(1)
+					request := new(RequestVoteArgs)
+					request.Term = rf.currentTerm
+					request.CandidateId = me
+					request.LastLogIndex = len(rf.log)
+					request.LastLogTerm = rf.log.term
+					reply := new(RequestVoteReply)
+				
+					go func(){
+						defer wg.Done()
+						ok := rf.sendRequestVote(i, request, reply)
+						if ok {
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
+								isFollower = true
+								isCandidate = false
+							}
+							if reply.VoteGranted {
+								votedSum++
+							}
+						}  else {
+							fmt.Println("refused in voting")
+						}
+					}()
+				}
+				wg.Wait()
+				/*if number of granted clients are majority, become a leader*/
+				if votedSum > (len(peers)-1)/2 {
+					isleader = true
+				}
+			}
+
+			for isLeader {
+
 			}
 		}
 	}()
