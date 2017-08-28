@@ -47,7 +47,7 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
-type entry struct {
+type Entry struct {
 	term       int
 	command    interface{}
 }
@@ -71,7 +71,7 @@ type Raft struct {
 	/*persistent state*/
 	currentTerm   int
 	votedFor      int
-	log           entry
+	log           []*Entry
 
 	/*volatile state on all servers*/
 	commitIndex   int
@@ -136,7 +136,7 @@ type AppendEntriesArgs struct {
 	LeaderId       int
 	PrevLogIndex   int
 	PrevLogTerm    int
-	Entries        []entry
+	Entries        []*Entry
 	LeaderCommit   int
 }
 
@@ -356,12 +356,40 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 
 			if rf.state == leader {
+				rf.mu.Lock()
+				rf.nextIndex = len(rf.log)+1
+				rf.matched = 0
+				rf.mu.Unlock()
+
+				ch := make(chan bool)
+				ch1 := make(chan bool)
+				go func (){
+					for {
+						go sendAppendEntriesToOther(rf, &Entry{}, ch1)
+						<-ch1
+						time.Sleep(time.Duration(??) * time.Millisecond)
+					}
+				}()
 				for {
 					for msg := range applyCh {
-						go sendAppendEntriesToOther(rf, msg)
+						rf.mu.Lock()
+						rf.lastApplied = msg.Index
+						newEntry = new(Entry)
+						newEntry.term = rf.currentTerm
+						newEntry.command = msg.command
+						rf.log = append(rf.log, newEntry)
+						rf.mu.Unlock()
+						go sendAppendEntriesToOther(rf, newEntry, ch)
+						if res := <-ch; res {
+							
+						}
 					}
 				}
 			} else if rf.state == follower {
+				rf.mu.Lock()
+				rf.commitIndex = 0
+				rf.lastApplied = 0
+				rf.mu.Unlock()
 				for {
 					rf.mu.Lock()
 					if rf.commitIndex > rf.lastApplied {
@@ -375,23 +403,35 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func sendAppendEntriesToOther(rf *raft, msg ApplyMsg) {
-	if i == rf.me {
-		continue
-	}
-	rf.mu.Lock()
-	args := new(AppendEntriesArgs)
-	args.Term = rf.currentTerm
-	args.LeaderId = rf.me
-	args.PrevLogIndex = 
-	args.PrevLogTerm = 
-	args.Entries = 
-	args.LeaderCommit =
-	rf.mu.Unlock()
-	reply := new(AppendEntriesreply)
-	res := sendAppendEntries(i, args, reply)
-	if res {
-
+func sendAppendEntriesToOther(rf *raft, en *Entry, c chan bool) {
+	sum := 0
+	quit := false
+	for !quit {
+		for i, _ := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			rf.mu.Lock()
+			args := new(AppendEntriesArgs)
+			args.Term = rf.currentTerm
+			args.LeaderId = rf.me
+			args.PrevLogIndex = 
+			args.PrevLogTerm = 
+			args.Entries = en
+			args.LeaderCommit = rf.commitIndex
+			rf.mu.Unlock()
+			reply := new(AppendEntriesreply)
+			res := sendAppendEntries(i, args, reply)
+			if res {
+				sum++
+			}
+		}
+		if sum == len(rf.peers)-1 {
+			c<-true
+			quit = true
+		} else {
+			quit = false
+		}
 	}
 }
 
