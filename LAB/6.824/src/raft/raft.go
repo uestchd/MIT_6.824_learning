@@ -67,6 +67,7 @@ type Raft struct {
 
 	Cond       *sync.Cond
 	event       int
+	role        int
 	/*persistent state*/
 	currentTerm   int
 	votedFor      int
@@ -88,6 +89,14 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	term = rf.currentTerm
+	if rf.role == leader {
+		isleader = true
+	} else {
+		isleader = false
+	}
+	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -142,6 +151,7 @@ func (rf *raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	}
+	if 
 
 	/*if success*/
 	rf.event = appendRpc
@@ -290,55 +300,99 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.Cond = sync.NewCond(&rf.mu)
 	rf.event = unknown
 	
-	go func(){
-		state := follower
-		d1 := rand.Int(150) + 150
+	go func(applyCh chan ApplyMsg) {
 		for {
-			expir := make(chan bool)
-			rpcCh := make(chan bool)
+			state := follower
+			d1 := rand.Int(150) + 150
+			elected := false
+			var event int
+			rpcCh := make(chan int)
+			go checkRpc(rf, rpcCh)
 
-			switch state {
-				case follower:
-					go startNTimer(d1, expire)
-					go checkRpc(rf, rpcCh)
-					select {
-						case <-expire:
-							state = candidate
-						case <-rpcCh:
-							state = follower
+			/*start a new election*/
+			for !elected {
+				expir := make(chan bool)	
+				votech := make(chan bool)
+
+				switch state {
+					case follower:
+						go startNTimer(d1, expire)
+
+					case candidate:
+						rf.mu.Lock()
+						rf.currentTerm++
+						rf.votedFor = me
+						rf.mu.Unlock()
+						go startVoteForSelf(rf, ch)
+						go startNTimer(d1, expire)
+				}
+
+			DONE:
+				select {
+					case <-expire:
+						if rf.state == follower {
+							rf.state = candidate
+							elected = false
+						} else if rf.state == candidate {
+							elected = false
+						}
+					case <-rpcCh:
+						if rf.state == follower {
+							elected = true
+						} else if rf.state == candidate {
+							rf.state = follower
+							elected = true
+						}
+					case res = <-votech:
+						if res {
+							rf.state = leader
+							elected = true
+						} else {
+							fmt.Println("received less than half vote")
+							goto DONE
+						}
+				}
+				state = rf.state
+			}
+
+			if rf.state == leader {
+				for {
+					for msg := range applyCh {
+						go sendAppendEntriesToOther(rf, msg)
 					}
-				case candidate:
+				}
+			} else if rf.state == follower {
+				for {
 					rf.mu.Lock()
-					rf.currentTerm++
-					rf.votedFor = me
+					if rf.commitIndex > rf.lastApplied {
+						rf.lastApplied++
+					}
 					rf.mu.Unlock()
-					ch := make(chan bool)
-					go startVoteForSelf(rf, ch)
-					go startNTimer(d1, expire)
-					go checkRpc(rf, rpcCh)
-					DONE:
-						for {
-							select {
-								case <-expire:
-									state = candidate
-									break DONE
-								case <-rpcCh:
-									state = follower
-									break DONE
-								case elected := <-ch:
-									if elected {
-										state = leader
-										break DONE
-									}
-								}
-							}
-				case leader:
-					sendAppendEntries()
+				}
 			}
 		}
-	}()
-
+	}(applyCh)
 	return rf
+}
+
+func sendAppendEntriesToOther(rf *raft, msg ApplyMsg) {
+	if i == rf.me {
+		continue
+	}
+	rf.mu.Lock()
+	args := new(AppendEntriesArgs)
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.PrevLogIndex = 
+	args.PrevLogTerm = 
+	args.Entries = 
+	args.LeaderCommit =
+	rf.mu.Unlock()
+	reply := new(AppendEntriesreply)
+	res := sendAppendEntries(i, args, reply)
+	if res {
+
+	}
 }
 
 func startVoteForSelf(rf *Raft, elected chan bool) {
@@ -389,17 +443,19 @@ func startVoteForSelf(rf *Raft, elected chan bool) {
 	elected<-false
 }
 
-func checkRpc(rf *Raft, c chan bool) {
-	rf.mu.Lock()
-	for rf.event==unknown {
-		rf.Cond.Wait()
-	}
+func checkRpc(rf *Raft, c chan int) {
+	for {
+		rf.mu.Lock()
+		for rf.event==unknown {
+			rf.Cond.Wait()
+		}
 
-	if rf.event != unknown {
-		c<-true
-		rf.event = unknown
+		if rf.event != unknown {
+			c <- rf.event
+			rf.event = unknown
+		}
+		rf.mu.Unlock()
 	}
-	rf.mu.Unlock()
 }
 
 func startNTimer(n int, c chan bool) {
