@@ -23,7 +23,17 @@ import "labrpc"
 // import "bytes"
 // import "encoding/gob"
 
+const (
+	follower = iota
+	candidate
+	leader
+)
 
+const (
+	unknown = iota
+	voteRpc
+	appendRpc
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -55,10 +65,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	rpcCond       *sync.Cond
-	isLeader      bool
-	isCandidate   bool
-	voteReq       bool
+	Cond       *sync.Cond
+	event       int
 	/*persistent state*/
 	currentTerm   int
 	votedFor      int
@@ -136,12 +144,16 @@ func (rf *raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	}
 
 	/*if success*/
-	rf.voteReq = true
-	rf.rpcCond.Broadcast()
+	rf.event = appendRpc
+	rf.Cond.Broadcast()
 	rf.mu.Unlock()
 	return nil
 }
 
+func (rf *raft)sendAppendEntries(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool{
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -177,8 +189,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 	}
 	reply.Term = rf.currentTerm
-	rf.voteReq = true
-	rf.rpcCond.Broadcast()
+	rf.event = voteRpc
+	rf.Cond.Broadcast()
 	rf.mu.Unlock()
 	return nil
 }
@@ -275,142 +287,122 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	rf.rpcCond = sync.NewCond(&rf.mu)
-	rf.voteReq = false
-	isFollower := true
-	isCandidate := false
-	isLeader := false
+	rf.Cond = sync.NewCond(&rf.mu)
+	rf.event = unknown
+	
 	go func(){
-		/*define a timer for election*/
-		// rand.Seed(time.Now().UTC().UnixNano())
-		var t *time.Timer
-		d := rand.Int(150) + 150
+		state := follower
+		d1 := rand.Int(150) + 150
 		for {
-			/*As requested, we start a timer every time a new election*/
-			expired := false
-			t = time.NewTimer(time.Duration(d))
-			go func(){
-				/*A helping thread for self-judging to be a follower or a 
-				  candidate based on the accepted event of a vote request
-				  or a timer expired*/
-				<- t.C
-				rf.mu.Lock()
-				expired = true
-				rf.rpcCond.Broadcast()
-				rf.mu.Unlock()
-			}()
-			//time.Sleep(time.Duration(d) * time.Millisecond)
-			/*Timer expired without receiving AppendEntries from others*/
-			rf.mu.Lock()
-			for !rf.voteReq && !expired{
-				rf.rpcCond.Wait()
-			}
+			expir := make(chan bool)
+			rpcCh := make(chan bool)
 
-			if rf.voteReq {
-				isFollower = true
-				if !t.stop() {
-					<- t.C
-				}
-				rf.voteReq = false
-			} else if expired {
-				isFollower = false
-				isCandidate = true
-				expired = false
-			}
-			rf.mu.Unlock()
-
-			/*if it is a candidate, wait for the empty entries for */
-			if isCandidate {
-				/*start the election*/
-				rf.currentTerm++
-				rf.votedFor = me
-				t.Reset(time.Duration(d))
-				go func(){
-					<- t.C
-					expired = true
-					rf.rpcCond.Broadcast()
-				}()
-
-				quit := make(ch bool)
-				go func(q ch) {
-					for {
-						go func(){
-							rf.mu.Lock()
-
-							rf.mu.Unlock()
-							}()
-						<- q
-						break
+			switch state {
+				case follower:
+					go startNTimer(d1, expire)
+					go checkRpc(rf, rpcCh)
+					select {
+						case <-expire:
+							state = candidate
+						case <-rpcCh:
+							state = follower
 					}
-				}(quit)
-
-				rf.mu.Lock()
-				for !rf.voteReq && !isLeader && !expired {
-					rf.rpcCond.Wait()
-				}
-				if rf.voteReq {
-					isFollower = true
-					isLeader = false
-					if !t.stop() {
-						<- t.C
-					}
-					rf.voteReq = false
-				} else if expired {
-					isFollower = true
-					isLeader = false
-				} else if isLeader {
-					isFollower = false
-					break
-				}
-				isCandidate = false
-				rf.mu.Unlock()
-
-
-				/*send RequestVote RPCs to all other servers*/
-				votedSum := 0
-				var wg sync.WaitGroup
-				for i, _ := range rf.peers {
-					if (i == rf.me) {
-						continue
-					}
-
-					wg.Add(1)
-					request := new(RequestVoteArgs)
-					request.Term = rf.currentTerm
-					request.CandidateId = me
-					request.LastLogIndex = len(rf.log)
-					request.LastLogTerm = rf.log.term
-					reply := new(RequestVoteReply)
-				
-					go func(){
-						defer wg.Done()
-						ok := rf.sendRequestVote(i, request, reply)
-						if ok {
-							if reply.Term > rf.currentTerm {
-								rf.currentTerm = reply.Term
-								isFollower = true
-								isCandidate = false
+				case candidate:
+					rf.mu.Lock()
+					rf.currentTerm++
+					rf.votedFor = me
+					rf.mu.Unlock()
+					ch := make(chan bool)
+					go startVoteForSelf(rf, ch)
+					go startNTimer(d1, expire)
+					go checkRpc(rf, rpcCh)
+					DONE:
+						for {
+							select {
+								case <-expire:
+									state = candidate
+									break DONE
+								case <-rpcCh:
+									state = follower
+									break DONE
+								case elected := <-ch:
+									if elected {
+										state = leader
+										break DONE
+									}
+								}
 							}
-							if reply.VoteGranted {
-								votedSum++
-							}
-						}  else {
-							fmt.Println("refused in voting")
-						}
-					}()
-				}
-				wg.Wait()
-				/*if number of granted clients are majority, become a leader*/
-				if votedSum > (len(peers)-1)/2 {
-					isleader = true
-				}
-			}
-
-			for isLeader {
-
+				case leader:
+					sendAppendEntries()
 			}
 		}
 	}()
 
 	return rf
+}
+
+func startVoteForSelf(rf *Raft, elected chan bool) {
+	mutex := sync.Mutex
+	votedSum := 0
+	var wg sync.WaitGroup
+	for i, _ := range rf.peers {
+		if (i == rf.me) {
+			continue
+		}
+
+		wg.Add(1)
+		request := new(RequestVoteArgs)
+		rf.mu.Lock()
+		request.Term = rf.currentTerm
+		request.CandidateId = me
+		request.LastLogIndex = len(rf.log)
+		request.LastLogTerm = rf.log.term
+		rf.mu.Unlock()
+
+		reply := new(RequestVoteReply)
+		go func(){
+			defer wg.Done()
+			ok := rf.sendRequestVote(i, request, reply)
+			if ok {
+				if reply.Term > rf.currentTerm {
+					rf.mu.Lock()
+					rf.currentTerm = reply.Term
+					rf.mu.Unlock
+				}
+				if reply.VoteGranted {
+					mutex.Lock()
+					votedSum++
+					mutex.Unlock()
+				}
+			}  else {
+				fmt.Println("refused in voting")
+			}
+
+			mutex.Lock()
+			if votedSum > len(peers)/2 {
+				elected<-true
+			}
+			mutex.Unlock()
+		}()
+	}
+	wg.Wait()
+	elected<-false
+}
+
+func checkRpc(rf *Raft, c chan bool) {
+	rf.mu.Lock()
+	for rf.event==unknown {
+		rf.Cond.Wait()
+	}
+
+	if rf.event != unknown {
+		c<-true
+		rf.event = unknown
+	}
+	rf.mu.Unlock()
+}
+
+func startNTimer(n int, c chan bool) {
+	time.Sleep(time.Duration(n) * time.Millisecond)
+	c<-true
 }
