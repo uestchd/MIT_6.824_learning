@@ -149,9 +149,16 @@ func (rf *raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
-		reply.Term = rf.currentTerm
+		//reply.Term = rf.currentTerm
+	} 
+
+	if e, ok := log[args.PrevLogIndex]; ok {
+		if e.term != args.PrevLogTerm {
+			reply.Success = false
+			//reply.Term = rf.currentTerm
+		}
 	}
-	if 
+
 
 	/*if success*/
 	rf.event = appendRpc
@@ -299,6 +306,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.Cond = sync.NewCond(&rf.mu)
 	rf.event = unknown
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	
 	go func(applyCh chan ApplyMsg) {
 		for {
@@ -355,84 +364,97 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				state = rf.state
 			}
 
-			if rf.state == leader {
-				rf.mu.Lock()
-				rf.nextIndex = len(rf.log)+1
-				rf.matched = 0
-				rf.mu.Unlock()
-
-				ch := make(chan bool)
-				ch1 := make(chan bool)
-				go func (){
-					for {
-						go sendAppendEntriesToOther(rf, &Entry{}, ch1)
-						<-ch1
-						time.Sleep(time.Duration(??) * time.Millisecond)
-					}
-				}()
-				for {
-					for msg := range applyCh {
-						rf.mu.Lock()
-						rf.lastApplied = msg.Index
-						newEntry = new(Entry)
-						newEntry.term = rf.currentTerm
-						newEntry.command = msg.command
-						rf.log = append(rf.log, newEntry)
-						rf.mu.Unlock()
-						go sendAppendEntriesToOther(rf, newEntry, ch)
-						if res := <-ch; res {
-							
-						}
-					}
-				}
-			} else if rf.state == follower {
-				rf.mu.Lock()
-				rf.commitIndex = 0
-				rf.lastApplied = 0
-				rf.mu.Unlock()
+			/*Election finished*/
+			/*apply the entries to SM asynchronized*/
+			go func() {
 				for {
 					rf.mu.Lock()
 					if rf.commitIndex > rf.lastApplied {
 						rf.lastApplied++
+					} else {
+						for rf.event != appendRpc {
+							rf.Cond.Wait()
+						}
 					}
 					rf.mu.Unlock()
 				}
+			}
+
+			if rf.state == leader {
+				cond := sync.NewCond(&rf.mu)
+				for {
+					/*1.Stop others from voting by sending them empty AppendEntries*/
+					func() {	
+						for i, _ := range rf.peers {
+							if i == rf.me {
+								continue
+							}
+							rf.nextIndex[i] = len(rf.log)+1
+							rf.matchIndex = 0
+						}
+						sendAppendEntriesToAll(rf, &Entry{})
+					}()
+
+					/*2.accepting entries from client and send them to other servers, should be async*/
+					go func() {
+						for msg := range applyCh {
+							rf.mu.Lock()
+							rf.lastApplied = msg.Index
+							newEntry = new(Entry)
+							newEntry.term = rf.currentTerm
+							newEntry.command = msg.command
+							rf.log = append(rf.log, newEntry)
+							cond.Broadcast()
+							rf.mu.Unlock()
+							ch1<-true
+						}
+					}()
+
+					/*send new coming entry to all servers, try again when it fails*/
+					for {
+						for i, _ := range rf.peers {
+							if i == rf.me {
+								continue
+							}
+							rf.mu.Lock()
+							if len(log) >= rf.nextIndex[i] {
+								index := rf.nextIndex[i]
+								res := sendAppendEntriesToEach(rf, index)
+								if res {
+									rf.nextIndex[i] = len(log) + 1
+									rf.matchIndex
+								} else {
+									rf.nextIndex[i]--
+								}
+							} else {
+
+							}
+							rf.mu.Unlock()
+						}
+					}
+				}
+			}
+
+			if rf.state == follower {
+				//TODO:
 			}
 		}
 	}(applyCh)
 	return rf
 }
 
-func sendAppendEntriesToOther(rf *raft, en *Entry, c chan bool) {
-	sum := 0
-	quit := false
-	for !quit {
-		for i, _ := range rf.peers {
-			if i == rf.me {
-				continue
-			}
-			rf.mu.Lock()
-			args := new(AppendEntriesArgs)
-			args.Term = rf.currentTerm
-			args.LeaderId = rf.me
-			args.PrevLogIndex = 
-			args.PrevLogTerm = 
-			args.Entries = en
-			args.LeaderCommit = rf.commitIndex
-			rf.mu.Unlock()
-			reply := new(AppendEntriesreply)
-			res := sendAppendEntries(i, args, reply)
-			if res {
-				sum++
-			}
-		}
-		if sum == len(rf.peers)-1 {
-			c<-true
-			quit = true
-		} else {
-			quit = false
-		}
-	}
+func sendAppendEntriesToEach(rf *raft, serverid int) bool{
+	rf.mu.Lock()
+	args := new(AppendEntriesArgs)
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.PrevLogIndex = rf.
+	args.PrevLogTerm = 
+	args.Entries = en
+	args.LeaderCommit = rf.commitIndex
+	reply := new(AppendEntriesreply)
+	rf.mu.Unlock()
+	return sendAppendEntries(serverid, args, reply)
 }
 
 func startVoteForSelf(rf *Raft, elected chan bool) {
