@@ -70,7 +70,8 @@ type Raft struct {
 
 	Cond       *sync.Cond
 	event       int
-	state        int
+	state       int
+	servers     int
 	/*persistent state*/
 	currentTerm   int
 	votedFor      int
@@ -200,8 +201,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
-	} else if (rf.votedFor == 0 || rf.votedFor == args.CandidateId) && (args.LastLogIndex == len(rf.log)&& args.LastLogTerm == rf.log[len(rf.log)].term) {
-		reply.VoteGranted = true
+	} else if (rf.votedFor == 0 || rf.votedFor == args.CandidateId) {
+		if args.LastLogIndex == len(rf.log) {
+			if len(rf.log) == 0 {
+				reply.VoteGranted = true
+			} else if args.LastLogTerm == rf.log[len(rf.log)-1].term {
+				reply.VoteGranted = true
+			}
+		}
 	}
 	reply.Term = rf.currentTerm
 	rf.event = voteRpc
@@ -306,6 +313,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.event = unknown
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.servers = len(peers)
+	rf.nextIndex = make([]int, rf.servers)
+	rf.matchIndex = make([]int, rf.servers)
 
 	go func(applyCh chan ApplyMsg) {
 		for {
@@ -341,9 +351,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					state := <-mainC
 					switch state {
 						case follower:
+							fmt.Println("being a follower")
 							go startNTimer(d1, expire)
 
 						case candidate:
+							fmt.Println("being a candidate")
 							rf.mu.Lock()
 							rf.currentTerm++
 							rf.votedFor = me
@@ -352,6 +364,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							go startNTimer(d1, expire)
 
 						case leader:
+							fmt.Println("being a leader")
 							/*send heartbeat to others to prevent them
 							  from being a leader or candidate*/
 							rf.sendAppendEntriesToAll(nil)
@@ -361,9 +374,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 			}()
 			
+			mainC <- rf.state
 			for {
 				select {
 					case <-expire:
+						fmt.Println("time out")
 						rf.mu.Lock()
 						/*Now expire event only sended out by 
 						  follower and candidate*/
@@ -373,6 +388,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						mainC <- rf.state
 						rf.mu.Unlock()
 					case <-rpcCh:
+						fmt.Println("got rpc changes")
 						rf.mu.Lock()
 						/*if received a rpcCh, change role*/
 						if rf.state == follower {
@@ -383,6 +399,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						}
 						rf.mu.Unlock()
 					case res := <-votech:
+						fmt.Println("got voted")
 						rf.mu.Lock()
 						if res {
 							rf.state = leader
@@ -445,6 +462,7 @@ func (rf *Raft) leaderServe() {
 }
 
 func (rf *Raft) initLeader() {
+	fmt.Println("initLeader")
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -492,6 +510,7 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
 }
 
 func (rf *Raft) startVoteForSelf(elected chan bool) {
+	fmt.Println("start to vote")
 	var mutex sync.Mutex
 	votedSum := 1
 	var wg sync.WaitGroup
@@ -506,7 +525,11 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 		request.Term = rf.currentTerm
 		request.CandidateId = rf.me
 		request.LastLogIndex = len(rf.log)
-		request.LastLogTerm = rf.log[len(rf.log)].term
+		if len(rf.log) == 0 {
+			request.LastLogTerm = 0
+		} else {
+			request.LastLogTerm = rf.log[len(rf.log)-1].term
+		}
 		rf.mu.Unlock()
 
 		reply := new(RequestVoteReply)
