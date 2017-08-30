@@ -28,6 +28,7 @@ import "time"
 
 const (
 	follower = iota
+	followerN
 	candidate
 	leader
 )
@@ -74,7 +75,7 @@ type Raft struct {
 	servers     int
 	/*persistent state*/
 	currentTerm   int
-	votedFor      int
+	votedFor      *int
 	log           []*Entry
 
 	/*volatile state on all servers*/
@@ -198,18 +199,42 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	fmt.Println("got vote request at server id: ", rf.me)
 	rf.mu.Lock()
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
-	} else if (rf.votedFor == 0 || rf.votedFor == args.CandidateId) {
-		if args.LastLogIndex == len(rf.log) {
-			if len(rf.log) == 0 {
-				reply.VoteGranted = true
-			} else if args.LastLogTerm == rf.log[len(rf.log)-1].term {
-				reply.VoteGranted = true
+		return
+	}
+	granted := false
+	if rf.votedFor == nil {
+		granted = true
+	} else if *rf.votedFor == args.CandidateId {
+		granted = true
+	}
+	if !granted {
+		reply.VoteGranted = false
+		return
+	}
+
+	if args.LastLogIndex != len(rf.log) {
+		granted = false
+	} else {
+		if len(rf.log) == 0 {
+			if args.LastLogTerm != 0 {
+				granted = false
 			}
+		} else if args.LastLogTerm != rf.log[len(rf.log)-1].term {
+			granted = false
 		}
 	}
+	
+	if !granted {
+		reply.VoteGranted = false
+		return
+	}
+
+	fmt.Println("vote granted at: ", rf.me)
+	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 	rf.event = voteRpc
 	rf.Cond.Broadcast()
@@ -310,6 +335,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	rf.Cond = sync.NewCond(&rf.mu)
+	rf.votedFor = nil
 	rf.event = unknown
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -351,23 +377,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					state := <-mainC
 					switch state {
 						case follower:
-							fmt.Println("being a follower")
+							fmt.Println("being a follower: ", rf.me)
 							go startNTimer(d1, expire)
 
+						case followerN:
+							fmt.Println("being followerN: ", rf.me)
 						case candidate:
-							fmt.Println("being a candidate")
+							fmt.Println("being a candidate: ", rf.me)
 							rf.mu.Lock()
 							rf.currentTerm++
-							rf.votedFor = me
+							rf.votedFor = &rf.me
 							rf.mu.Unlock()
 							go rf.startVoteForSelf(votech)
 							go startNTimer(d1, expire)
 
 						case leader:
-							fmt.Println("being a leader")
+							fmt.Println("being a leader: ", rf.me)
 							/*send heartbeat to others to prevent them
 							  from being a leader or candidate*/
-							rf.sendAppendEntriesToAll(nil)
+							// rf.sendAppendEntriesToAll(nil)
 							rf.initLeader()
 							go rf.leaderServe()
 					}
@@ -378,30 +406,32 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			for {
 				select {
 					case <-expire:
-						fmt.Println("time out")
+						fmt.Println("time out: ", rf.me)
 						rf.mu.Lock()
 						/*Now expire event only sended out by 
 						  follower and candidate*/
 						if rf.state == follower {
 							rf.state = candidate
+							mainC <- rf.state
 						}
-						mainC <- rf.state
 						rf.mu.Unlock()
 					case <-rpcCh:
-						fmt.Println("got rpc changes")
+						fmt.Println("got rpc changes: ", rf.me)
 						rf.mu.Lock()
 						/*if received a rpcCh, change role*/
 						if rf.state == follower {
-							// TODO:
+							rf.state = followerN
+							mainC <- followerN
 						} else if rf.state == candidate {
-							rf.state = follower
-							mainC <- follower
+							rf.state = followerN
+							mainC <- followerN
 						}
 						rf.mu.Unlock()
 					case res := <-votech:
-						fmt.Println("got voted")
+						fmt.Println("got voted: ", rf.me)
 						rf.mu.Lock()
 						if res {
+							fmt.Println("vote res: ", res)
 							rf.state = leader
 						} else {
 							rf.state = candidate
@@ -458,7 +488,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) leaderServe() {
 	/*listening from client, add log to local
 	  and send append rpc to others asyncly*/
+	  for {
 
+	  }
 }
 
 func (rf *Raft) initLeader() {
@@ -512,7 +544,8 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
 func (rf *Raft) startVoteForSelf(elected chan bool) {
 	fmt.Println("start to vote")
 	var mutex sync.Mutex
-	votedSum := 1
+	votedSum := 0
+	happened := false
 	var wg sync.WaitGroup
 	for i, _ := range rf.peers {
 		if (i == rf.me) {
@@ -522,6 +555,7 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 		wg.Add(1)
 		request := new(RequestVoteArgs)
 		rf.mu.Lock()
+		serverid := i
 		request.Term = rf.currentTerm
 		request.CandidateId = rf.me
 		request.LastLogIndex = len(rf.log)
@@ -535,7 +569,7 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 		reply := new(RequestVoteReply)
 		go func(){
 			defer wg.Done()
-			ok := rf.sendRequestVote(i, request, reply)
+			ok := rf.sendRequestVote(serverid, request, reply)
 			if ok {
 				if reply.VoteGranted {
 					mutex.Lock()
@@ -547,14 +581,17 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 			}
 
 			mutex.Lock()
-			if votedSum > len(rf.peers)/2 {
+			if votedSum == len(rf.peers)/2 && !happened {
+				happened = true
 				elected<-true
 			}
 			mutex.Unlock()
 		}()
 	}
 	wg.Wait()
-	elected<-false
+	if !happened {
+		elected<-false
+	}
 }
 
 func (rf *Raft) checkRpc(c chan int) {
@@ -565,7 +602,8 @@ func (rf *Raft) checkRpc(c chan int) {
 		}
 
 		if rf.event != unknown {
-			c <- rf.event
+			res := rf.event
+			c <- res
 			rf.event = unknown
 		}
 		rf.mu.Unlock()
