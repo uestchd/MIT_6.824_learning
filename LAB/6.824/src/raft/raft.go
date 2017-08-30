@@ -456,46 +456,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						rf.mu.Unlock()
 				}
 			}
-
-			/*if rf.state == leader {
-				for {
-					go func() {
-						for msg := range applyCh {
-							rf.mu.Lock()
-							rf.lastApplied = msg.Index
-							newEntry = new(Entry)
-							newEntry.term = rf.currentTerm
-							newEntry.command = msg.command
-							rf.log = append(rf.log, newEntry)
-							cond.Broadcast()
-							rf.mu.Unlock()
-							ch1<-true
-						}
-					}()
-
-					for {
-						for i, _ := range rf.peers {
-							if i == rf.me {
-								continue
-							}
-							rf.mu.Lock()
-							if len(log) >= rf.nextIndex[i] {
-								index := rf.nextIndex[i]
-								res := sendAppendEntriesToEach(rf, index)
-								if res {
-									rf.nextIndex[i] = len(log) + 1
-									rf.matchIndex
-								} else {
-									rf.nextIndex[i]--
-								}
-							} else {
-
-							}
-							rf.mu.Unlock()
-						}
-					}
-				}
-			}*/
 		}
 	}(applyCh)
 	return rf
@@ -550,9 +510,15 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
 		rf.matchIndex[i] = 0
 		go func(id int) {
 			defer wg.Done()
-			res := rf.sendAppendEntriesToEach(id, e)
-			if res {
-				success++
+			res := false
+			for {
+				/*TODO: if returns false, means we don't match the log*/
+				res = rf.sendAppendEntriesToEach(id, e)
+				if res {
+					success++
+					break
+				}
+				rf.nextIndex[i]--
 			}
 		}(i)
 	}
