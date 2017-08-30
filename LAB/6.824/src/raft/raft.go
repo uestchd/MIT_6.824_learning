@@ -152,19 +152,36 @@ type AppendEntriesreply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.Success = false
+		return
 	} 
 
-	/*if e, ok := rf.log[args.PrevLogIndex]; ok {
-		if e.term != args.PrevLogTerm {
-			reply.Success = false
-		}
-	}*/
+	if rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+		reply.Success = false
+	}
+	
+	if reply.Success == false {
+		t := args.PrevLogIndex-1
+		rf.log = rf.log[0:t]
+		return
+	}
+	
 	/*if success*/
+	//rf.log = append(rf.log, args.Entries)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = func(a,b int) int{
+			if a < b {
+				return a
+			}
+			return b
+		}(args.LeaderCommit, len(rf.log))
+	}
+	reply.Success = true
 	rf.event = appendRpc
 	rf.Cond.Broadcast()
-	rf.mu.Unlock()
 	return
 }
 
@@ -201,10 +218,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	fmt.Println("got vote request at server id: ", rf.me)
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
 		return
 	}
+	rf.currentTerm = args.Term
 	granted := false
 	if rf.votedFor == nil {
 		granted = true
@@ -238,7 +257,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	rf.event = voteRpc
 	rf.Cond.Broadcast()
-	rf.mu.Unlock()
 	return
 }
 
@@ -335,6 +353,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	rf.Cond = sync.NewCond(&rf.mu)
+	rf.currentTerm = 0
 	rf.votedFor = nil
 	rf.event = unknown
 	rf.commitIndex = 0
@@ -382,6 +401,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 						case followerN:
 							fmt.Println("being followerN: ", rf.me)
+
 						case candidate:
 							fmt.Println("being a candidate: ", rf.me)
 							rf.mu.Lock()
@@ -393,8 +413,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 						case leader:
 							fmt.Println("being a leader: ", rf.me)
-							/*send heartbeat to others to prevent them
-							  from being a leader or candidate*/
+							//rf.sendingHeartBeat()
 							// rf.sendAppendEntriesToAll(nil)
 							rf.initLeader()
 							go rf.leaderServe()
@@ -419,12 +438,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						fmt.Println("got rpc changes: ", rf.me)
 						rf.mu.Lock()
 						/*if received a rpcCh, change role*/
-						if rf.state == follower {
+						if rf.state == follower || rf.state == candidate{
 							rf.state = followerN
-							mainC <- followerN
-						} else if rf.state == candidate {
-							rf.state = followerN
-							mainC <- followerN
+							mainC <- rf.state
 						}
 						rf.mu.Unlock()
 					case res := <-votech:
@@ -493,6 +509,10 @@ func (rf *Raft) leaderServe() {
 	  }
 }
 
+func (rf *Raft)sendingHeartBeat() {
+
+}
+
 func (rf *Raft) initLeader() {
 	fmt.Println("initLeader")
 	for i, _ := range rf.peers {
@@ -504,41 +524,43 @@ func (rf *Raft) initLeader() {
 	}
 }
 
-func (rf *Raft) sendAppendEntriesToEach(serverid int, e *Entry, c chan bool) {
+func (rf *Raft) sendAppendEntriesToEach(serverid int, e *Entry) bool{
 	rf.mu.Lock()
 	args := new(AppendEntriesArgs)
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
-	args.PrevLogIndex = 2
-	args.PrevLogTerm = 2
+	args.PrevLogIndex = rf.nextIndex[serverid]-1
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].term
 	args.Entries = append(args.Entries, e)
 	args.LeaderCommit = rf.commitIndex
 	reply := new(AppendEntriesreply)
 	rf.mu.Unlock()
-	c<-rf.sendAppendEntries(serverid, args, reply)
+	return rf.sendAppendEntries(serverid, args, reply)
 }
 
 func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
-	// sum := 0
-	ch := make(chan bool)
+	success := 0
+	var wg sync.WaitGroup
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
+		wg.Add(1)
 		rf.nextIndex[i] = len(rf.log)+1
-		rf.matchIndex[i] = 0	
-		go rf.sendAppendEntriesToEach(i, e, ch)
+		rf.matchIndex[i] = 0
+		go func(id int) {
+			defer wg.Done()
+			res := rf.sendAppendEntriesToEach(id, e)
+			if res {
+				success++
+			}
+		}(i)
 	}
-	// sum = len(rf.peers)+1
-	/*for res := range rf.peers {
-		if res := <-ch; res{
-			sum++
-		}
-		if sum >len(rf.peers) {
-			return true
-		}
-	}*/
-	return true
+	wg.Wait()
+	if success == rf.servers {
+		return true
+	}
+	return false
 }
 
 func (rf *Raft) startVoteForSelf(elected chan bool) {
