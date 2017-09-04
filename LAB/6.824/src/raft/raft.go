@@ -342,8 +342,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newEntry.Command = mcommand
 	rf.mu.Lock()
 	rf.log = append(rf.log, *newEntry)
-	rf.mu.Unlock()
 	rf.sendAppendEntriesToAll(newEntry)
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
