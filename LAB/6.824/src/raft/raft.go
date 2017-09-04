@@ -22,6 +22,7 @@ import "labrpc"
 import "math/rand"
 import "fmt"
 import "time"
+import "reflect"
 
 // import "bytes"
 // import "encoding/gob"
@@ -330,8 +331,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	mcommand := reflect.ValueOf(command)
+	if rf.state != leader {
+		return index, term, !isLeader
+	}
 
-
+	/*here comes the leader*/
+	newEntry := new(Entry)
+	newEntry.Term = rf.currentTerm
+	newEntry.Command = mcommand
+	rf.mu.Lock()
+	rf.log = append(rf.log, *newEntry)
+	rf.mu.Unlock()
+	rf.sendAppendEntriesToAll(newEntry)
 	return index, term, isLeader
 }
 
@@ -518,14 +530,14 @@ func (rf *Raft) sendingHeartBeat() {
 
 func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 	success := 0
-	//var wg sync.WaitGroup
+	var wg sync.WaitGroup
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		//wg.Add(1)
+		wg.Add(1)
 		go func(serverid int) {
-			//defer wg.Done()
+			defer wg.Done()
 			res := false
 			rf.mu.Lock()
 			args := new(AppendEntriesArgs)
@@ -575,7 +587,7 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 			}
 		}(i)
 	}
-	//wg.Wait()
+	wg.Wait()
 	/*if success == rf.servers {
 		return true
 	}
