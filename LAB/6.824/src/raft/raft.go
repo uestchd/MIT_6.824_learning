@@ -154,7 +154,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Success = true
-	fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
+	//fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		fmt.Println("request term less than receiver term, refused")
 		reply.Term = rf.currentTerm
@@ -249,7 +249,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		granted = true
 	}
 	if !granted {
-		fmt.Println("granted error")
 		reply.VoteGranted = false
 		return
 	}
@@ -267,7 +266,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	
 	if !granted {
-		fmt.Println("granted error2")
 		reply.VoteGranted = false
 		return
 	}
@@ -464,9 +462,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						}
 						rf.mu.Unlock()
 					case res := <-votech:
-						fmt.Println("got voted: ", rf.me)
+						//fmt.Println("got voted: ", rf.me)
 						rf.mu.Lock()
-						fmt.Println("vote res: ", res)
+						//fmt.Println("vote res: ", res)
 						if res {
 							rf.state = leader
 							rf.stopNTimer()
@@ -498,9 +496,7 @@ func (rf *Raft) initLeader() {
 func (rf *Raft) sendingHeartBeat() {
 	state := leader
 	for state == leader {
-		fmt.Println("sending heart beating, before sleep state: ",state)
 		time.Sleep(time.Duration(20) * time.Millisecond)
-		fmt.Println("sending heart beating, state: ",state)
 		rf.mu.Lock()
 		state = rf.state
 		rf.mu.Unlock()	
@@ -529,7 +525,6 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 		}
 		//wg.Add(1)
 		go func(serverid int) {
-			fmt.Println("sending rpc to server ",serverid)
 			//defer wg.Done()
 			res := false
 			rf.mu.Lock()
@@ -549,7 +544,6 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 			rf.mu.Unlock()
 
 			for {
-				fmt.Println("before sending to serverid",serverid)
 				res = rf.sendAppendEntries(serverid, args, reply)
 				fmt.Println("rpc res: ",res)
 				if res {
@@ -663,7 +657,7 @@ func (rf *Raft) checkRpc(c chan int) {
 
 func (rf *Raft) stopNTimer() {
 	if rf.timer != nil {
-		fmt.Println("timer stopped")
+		//fmt.Println("timer stopped")
 		if !rf.timer.Stop() {
 			<- rf.timer.C
 		}
