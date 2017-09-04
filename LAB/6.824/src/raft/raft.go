@@ -154,7 +154,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Success = true
-	//fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
+	fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		fmt.Println("request term less than receiver term, refused")
 		reply.Term = rf.currentTerm
@@ -162,7 +162,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 		return
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		reply.Term = rf.currentTerm
+		reply.Term = args.Term
 		rf.state = follower
 	}
 
@@ -174,6 +174,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 			t := args.PrevLogIndex-1
 			rf.log = rf.log[0:t]
 			reply.Success = false
+			rf.Cond.Broadcast()
 			return
 		} else {
 			for i:=0;i<len(args.Entries);i++ {
@@ -248,6 +249,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		granted = true
 	}
 	if !granted {
+		fmt.Println("granted error")
 		reply.VoteGranted = false
 		return
 	}
@@ -265,6 +267,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	
 	if !granted {
+		fmt.Println("granted error2")
 		reply.VoteGranted = false
 		return
 	}
@@ -463,12 +466,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					case res := <-votech:
 						fmt.Println("got voted: ", rf.me)
 						rf.mu.Lock()
+						fmt.Println("vote res: ", res)
 						if res {
-							fmt.Println("vote res: ", res)
 							rf.state = leader
 							rf.stopNTimer()
 							mainC <- rf.state
-						}
+						} 
+						rf.votedFor = nil
 						rf.mu.Unlock()
 				}
 			}
@@ -516,17 +520,17 @@ func (rf *Raft) sendingHeartBeat() {
 	}*/	
 }
 
-func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
+func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 	success := 0
-	var wg sync.WaitGroup
+	//var wg sync.WaitGroup
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
+		//wg.Add(1)
 		go func(serverid int) {
 			fmt.Println("sending rpc to server ",serverid)
-			defer wg.Done()
+			//defer wg.Done()
 			res := false
 			rf.mu.Lock()
 			args := new(AppendEntriesArgs)
@@ -556,9 +560,12 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
 					} else {
 						fmt.Println("yangtao reply fail")
 						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
 							rf.mu.Lock()
 							rf.state = follower
+							rf.Cond.Broadcast()
 							rf.mu.Unlock()
+							break
 						} else if args.PrevLogIndex > 0{
 							args.PrevLogIndex--
 							args.Entries = rf.log[args.PrevLogIndex:rf.nextIndex[serverid]-1]
@@ -574,11 +581,11 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry) bool{
 			}
 		}(i)
 	}
-	wg.Wait()
-	if success == rf.servers {
+	//wg.Wait()
+	/*if success == rf.servers {
 		return true
 	}
-	return false
+	return false*/
 }
 
 func (rf *Raft) startVoteForSelf(elected chan bool) {
@@ -605,9 +612,19 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 			rf.mu.Unlock()
 			ok := rf.sendRequestVote(serverid, request, reply)
 			if ok {
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.mu.Lock()
+					rf.state = follower
+					rf.Cond.Broadcast()
+					rf.mu.Unlock()
+				}
 				if reply.VoteGranted {
 					mutex.Lock()
 					votedSum++
+					if votedSum == len(rf.peers)/2 {
+						elected<-true
+					}
 					mutex.Unlock()
 				}
 			} else {
@@ -623,9 +640,7 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 		}(i)
 	}
 	wg.Wait()
-	if votedSum >= len(rf.peers)/2 {
-		elected<-true
-	} else {
+	if votedSum < len(rf.peers)/2 {
 		elected<-false
 	}
 }
