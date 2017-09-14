@@ -74,6 +74,10 @@ type Raft struct {
 	event       int
 	state       int
 	servers     int
+	stateChange chan bool
+	rpcCh       chan int
+	expire      chan bool
+	voteCh      chan bool
 	/*persistent state*/
 	currentTerm   int
 	votedFor      *int
@@ -154,6 +158,9 @@ type AppendEntriesreply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	rf.rpcCh<-appendRpc
+
 	reply.Success = true
 	//fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
 	if args.Term < rf.currentTerm {
@@ -175,7 +182,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 			t := args.PrevLogIndex-1
 			rf.log = rf.log[0:t]
 			reply.Success = false
-			rf.Cond.Broadcast()
 			return
 		} else {
 			for i:=0;i<len(args.Entries);i++ {
@@ -194,8 +200,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 		}(args.LeaderCommit, len(rf.log)-1)
 	}
 
-	rf.event = appendRpc
-	rf.Cond.Broadcast()
 	return
 }
 
@@ -233,6 +237,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//fmt.Println("got vote request at server id: ", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -272,8 +277,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	reply.VoteGranted = true
-	rf.event = voteRpc
-	rf.Cond.Broadcast()
+	rf.rpcCh<-voteRpc
 	return
 }
 
@@ -331,18 +335,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	fmt.Println("start cmd ", command)
 	mcommand := reflect.ValueOf(command)
 	if rf.state != leader {
 		return index, term, !isLeader
 	}
 
 	/*here comes the leader*/
+	fmt.Println("leader found!")
 	newEntry := new(Entry)
 	newEntry.Term = rf.currentTerm
 	newEntry.Command = mcommand
 	rf.mu.Lock()
 	rf.log = append(rf.log, *newEntry)
-	rf.sendAppendEntriesToAll(newEntry)
+	rf.Cond.Broadcast()
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -355,9 +361,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.state = follower
 }
 
 //
@@ -394,107 +397,111 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, rf.servers)
 	rf.log = append(rf.log, Entry{0,0})
 
+	rf.stateChange = make(chan bool)
+	rf.rpcCh = make(chan int)
+	rf.expire = make(chan bool)
+	rf.voteCh = make(chan bool)
+
 	go func(applyCh chan ApplyMsg) {
 		for {
 			rf.state = follower
-			d1 := rand.Intn(150) + 200
-
-			mainC := make(chan int)
-			rpcCh := make(chan int)
-			expire := make(chan bool)
-			votech := make(chan bool)
-
-			/*response to rpc */
-			go rf.checkRpc(rpcCh)
+			timer := rand.Intn(150) + 200
 
 			/*default action for every server*/
-			go func() {
-				for {
-					rf.mu.Lock()
-					if rf.commitIndex > rf.lastApplied {
-						rf.lastApplied++
-					} else {
-						for rf.commitIndex <= rf.lastApplied {
-							rf.Cond.Wait()
-						}
-					}
-					rf.mu.Unlock()
-				}
-			}()
+			go rf.handleLogEntries()
 
+			go rf.handlesignals()
 			/*real raft life*/
-			go func() {
-				for {
-					state := <-mainC
-					switch state {
-						case follower:
-							fmt.Println("being a follower: ", rf.me)
-							go rf.startNTimer(d1, expire)
-
-						case candidate:
-							fmt.Println("being a candidate: ", rf.me)
-							rf.mu.Lock()
-							rf.currentTerm++
-							rf.votedFor = &rf.me
-							rf.mu.Unlock()
-							go rf.startVoteForSelf(votech)
-							go rf.startNTimer(d1, expire)
-
-						case leader:
-							fmt.Println("being a leader: ", rf.me)
-							rf.initLeader()
-							go rf.sendingHeartBeat()
-							//go rf.handleClientMessages()
-					}
-				}
-			}()
-			
-			/*To kick off*/
-			mainC <- rf.state
-			for {
-				select {
-					case <-expire:
-						fmt.Println("time out: ", rf.me)
-						rf.mu.Lock()
-						/*For now, expire event only sended out by 
-						  follower and candidate*/
-						if rf.state == follower || rf.state == candidate{
-							rf.state = candidate
-							mainC <- rf.state
-						}
-						rf.mu.Unlock()
-					case <-rpcCh:
-						fmt.Println("got rpc changes: ", rf.me)
-						rf.mu.Lock()
-						/*if received a rpcCh, change role*/
-						if rf.state == follower || rf.state == candidate {
-							rf.stopNTimer()
-							rf.state = follower
-							mainC <- rf.state
-						}
-						rf.mu.Unlock()
-					case res := <-votech:
-						//fmt.Println("got voted: ", rf.me)
-						rf.mu.Lock()
-						//fmt.Println("vote res: ", res)
-						if res {
-							rf.state = leader
-							rf.stopNTimer()
-							mainC <- rf.state
-						} 
-						rf.votedFor = nil
-						rf.mu.Unlock()
-				}
-			}
+			rf.Run(timer)
 		}
 	}(applyCh)
 	return rf
 }
 
-func (rf *Raft) handleClientMessages() {
-	  for {
+func (rf *Raft) handleLogEntries() {
+	for {
+		rf.mu.Lock()
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+		} else {
+			for rf.commitIndex <= rf.lastApplied {
+				rf.Cond.Wait()
+			}
+		}
+		rf.mu.Unlock()
+	}
+}
 
-	  }
+func (rf *Raft) handlesignals() {
+	for {
+		select {
+			case <-rf.expire:
+				fmt.Println("time out: ", rf.me)
+				rf.handleTimerExpire()
+			case <-rf.rpcCh:
+				fmt.Println("got rpc changes: ", rf.me)
+				rf.handleRpcCall()
+			case res := <-rf.voteCh:
+				rf.handleVoteRes(res)
+		}
+	}
+}
+
+func (rf *Raft) handleTimerExpire() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state == follower || rf.state == candidate {
+		rf.state = candidate
+		rf.stateChange<-true
+	}
+}
+
+func (rf *Raft) handleRpcCall() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state == follower || rf.state == candidate {
+		rf.stopNTimer()
+		rf.state = follower
+		rf.stateChange<-true
+	}
+}
+
+func (rf *Raft) handleVoteRes(res bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//fmt.Println("vote res: ", res)
+	if res {
+		rf.state = leader
+		rf.stopNTimer()
+		rf.stateChange<-true
+	} 
+	rf.votedFor = nil
+}
+
+func (rf *Raft) Run(timer int) {
+	for {
+		switch rf.state {
+			case follower:
+				fmt.Println("being a follower: ", rf.me)
+				go rf.startNTimer(timer)
+
+			case candidate:
+				fmt.Println("being a candidate: ", rf.me)
+				rf.mu.Lock()
+				rf.currentTerm++
+				rf.votedFor = &rf.me
+				rf.mu.Unlock()
+				go rf.startVoteForSelf()
+				go rf.startNTimer(timer)
+
+			case leader:
+				fmt.Println("being a leader: ", rf.me)
+				rf.initLeader()
+				go rf.sendingHeartBeat()
+		}
+		<-rf.stateChange
+	}
 }
 
 func (rf *Raft) initLeader() {
@@ -517,15 +524,6 @@ func (rf *Raft) sendingHeartBeat() {
 			rf.sendAppendEntriesToAll(nil)
 		} 
 	}
-		/*fmt.Println("sending heart beat from ", rf.me,"currentTerm", rf.currentTerm)
-		rf.sendAppendEntriesToAll(nil)
-		time.Sleep(time.Duration(20) * time.Millisecond)
-		rf.mu.Lock()
-		if rf.state != leader {
-			quit = true
-		}
-		rf.mu.Unlock()
-	}*/	
 }
 
 func (rf *Raft) sendAppendEntriesToAll(e *Entry){
@@ -541,14 +539,12 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 			res := false
 			rf.mu.Lock()
 			args := new(AppendEntriesArgs)
-			//fmt.Println("sending currentTerm",rf.currentTerm,"from",rf.me)
 			args.Term = rf.currentTerm
 			args.LeaderId = rf.me
 			args.PrevLogIndex = rf.nextIndex[serverid]-1
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 			args.Entries = make([]Entry, 0)
 			if e != nil {
-				/*sending heartbeat*/
 				args.Entries = append(args.Entries, *e)
 			}
 			args.LeaderCommit = rf.commitIndex
@@ -569,8 +565,9 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 							rf.currentTerm = reply.Term
 							rf.mu.Lock()
 							rf.state = follower
-							rf.Cond.Broadcast()
+							rf.stateChange<-true
 							rf.mu.Unlock()
+
 							break
 						} else if args.PrevLogIndex > 0{
 							args.PrevLogIndex--
@@ -594,7 +591,7 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 	return false*/
 }
 
-func (rf *Raft) startVoteForSelf(elected chan bool) {
+func (rf *Raft) startVoteForSelf() {
 	fmt.Println("start to vote")
 	var mutex sync.Mutex
 	votedSum := 0
@@ -622,14 +619,14 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 					rf.currentTerm = reply.Term
 					rf.mu.Lock()
 					rf.state = follower
-					rf.Cond.Broadcast()
+					rf.stateChange<-true
 					rf.mu.Unlock()
 				}
 				if reply.VoteGranted {
 					mutex.Lock()
 					votedSum++
 					if votedSum == len(rf.peers)/2 {
-						elected<-true
+						rf.voteCh<-true
 					}
 					mutex.Unlock()
 				}
@@ -647,23 +644,7 @@ func (rf *Raft) startVoteForSelf(elected chan bool) {
 	}
 	wg.Wait()
 	if votedSum < len(rf.peers)/2 {
-		elected<-false
-	}
-}
-
-func (rf *Raft) checkRpc(c chan int) {
-	for {
-		rf.mu.Lock()
-		for rf.event==unknown {
-			rf.Cond.Wait()
-		}
-
-		if rf.event != unknown {
-			res := rf.event
-			c <- res
-			rf.event = unknown
-		}
-		rf.mu.Unlock()
+		rf.voteCh<-false
 	}
 }
 
@@ -677,9 +658,9 @@ func (rf *Raft) stopNTimer() {
 	}
 }
 
-func (rf *Raft) startNTimer(n int, c chan bool) {
+func (rf *Raft) startNTimer(n int) {
 	rf.timer = time.NewTimer(time.Duration(n) * time.Millisecond)
 	<-rf.timer.C
 	fmt.Println("times up")
-	c<-true
+	rf.expire<-true
 }
