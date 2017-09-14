@@ -499,6 +499,8 @@ func (rf *Raft) Run(timer int) {
 				fmt.Println("being a leader: ", rf.me)
 				rf.initLeader()
 				go rf.sendingHeartBeat()
+				//go rf.receivedAppendlogFromClient()
+				//go rf.serve()
 		}
 		<-rf.stateChange
 	}
@@ -512,8 +514,26 @@ func (rf *Raft) initLeader() {
 	}
 }
 
+func (rf *Raft) receivedAppendlogFromClient() {
+}
+
+func (rf *Raft) serve() {
+	// for each follower, send AppendEnties if needed
+	for i,_ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		if len(rf.log) >= rf.nextIndex[i] {
+			entries := make([]Entry, 0)
+			entries = rf.log[rf.nextIndex[i]:len(rf.log)]
+			rf.sendAppendEntriesToAll(entries)
+		}
+	}
+}
+
 func (rf *Raft) sendingHeartBeat() {
 	state := leader
+	emptyEntry := make([]Entry,0)
 	for state == leader {
 		time.Sleep(time.Duration(20) * time.Millisecond)
 		rf.mu.Lock()
@@ -521,12 +541,12 @@ func (rf *Raft) sendingHeartBeat() {
 		rf.mu.Unlock()	
 		if state == leader {
 			fmt.Println("sending heart beat from ", rf.me,"currentTerm", rf.currentTerm)
-			rf.sendAppendEntriesToAll(nil)
+			rf.sendAppendEntriesToAll(emptyEntry)
 		} 
 	}
 }
 
-func (rf *Raft) sendAppendEntriesToAll(e *Entry){
+func (rf *Raft) sendAppendEntriesToAll(e []Entry){
 	success := 0
 	var wg sync.WaitGroup
 	for i, _ := range rf.peers {
@@ -544,9 +564,7 @@ func (rf *Raft) sendAppendEntriesToAll(e *Entry){
 			args.PrevLogIndex = rf.nextIndex[serverid]-1
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 			args.Entries = make([]Entry, 0)
-			if e != nil {
-				args.Entries = append(args.Entries, *e)
-			}
+			args.Entries = e[:]
 			args.LeaderCommit = rf.commitIndex
 			reply := new(AppendEntriesreply)
 			rf.mu.Unlock()
