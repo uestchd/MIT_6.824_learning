@@ -259,14 +259,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if args.LastLogIndex != len(rf.log) {
+	if args.LastLogIndex != len(rf.log)-1 {
 		granted = false
 	} else {
-		if len(rf.log) == 0 {
-			if args.LastLogTerm != 0 {
-				granted = false
-			}
-		} else if args.LastLogTerm != rf.log[len(rf.log)-1].Term {
+		if args.LastLogTerm != rf.log[len(rf.log)-1].Term {
 			granted = false
 		}
 	}
@@ -348,6 +344,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newEntry.Command = mcommand
 	rf.mu.Lock()
 	rf.log = append(rf.log, *newEntry)
+	index = len(rf.log)
+	term = rf.currentTerm
 	rf.Cond.Broadcast()
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -395,7 +393,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.servers = len(peers)
 	rf.nextIndex = make([]int, rf.servers)
 	rf.matchIndex = make([]int, rf.servers)
-	rf.log = append(rf.log, Entry{0,0})
+	rf.log = make([]Entry, 1)
+	rf.log[0] = Entry{0,0}
 
 	rf.stateChange = make(chan bool)
 	rf.rpcCh = make(chan int)
@@ -627,8 +626,8 @@ func (rf *Raft) startVoteForSelf() {
 			request := new(RequestVoteArgs)
 			request.Term = rf.currentTerm
 			request.CandidateId = rf.me
-			request.LastLogIndex = len(rf.log)
-			request.LastLogTerm = rf.log[len(rf.log)-1].Term
+			request.LastLogIndex = len(rf.log)-1
+			request.LastLogTerm = rf.log[request.LastLogIndex].Term
 			reply := new(RequestVoteReply)
 			rf.mu.Unlock()
 			ok := rf.sendRequestVote(serverid, request, reply)
