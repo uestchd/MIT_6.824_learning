@@ -22,7 +22,7 @@ import "labrpc"
 import "math/rand"
 import "fmt"
 import "time"
-import "reflect"
+//import "reflect"
 
 // import "bytes"
 // import "encoding/gob"
@@ -70,6 +70,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	Cond       *sync.Cond
+	eAppended  chan bool
 	timer      *time.Timer
 	event       int
 	state       int
@@ -162,7 +163,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	rf.rpcCh<-appendRpc
 
 	reply.Success = true
-	//fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
+	fmt.Println(args)
+	fmt.Println("got append rpc args.Term",args.Term,"at server",rf.me,"currentTerm",rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		fmt.Println("request term less than receiver term, refused")
 		reply.Term = rf.currentTerm
@@ -177,19 +179,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 	/*heartbeat rpc carries no entries*/
 	if len(args.Entries) == 0 {
 		fmt.Println("got heartbeat at server ", rf.me)
-	} else if args.PrevLogIndex > 0 {
-		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			t := args.PrevLogIndex-1
-			rf.log = rf.log[0:t]
-			reply.Success = false
-			return
-		} else {
-			for i:=0;i<len(args.Entries);i++ {
-				rf.log = append(rf.log, args.Entries[i])
-			}
-			reply.Success = true
-		}
+		return
 	}
+
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		t := args.PrevLogIndex-1
+		rf.log = rf.log[0:t]
+		reply.Success = false
+		return
+	}
+
+	for i:=0;i<len(args.Entries);i++ {
+		rf.log = append(rf.log, args.Entries[i])
+	}
+	reply.Success = true
 	
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = func(a,b int) int{
@@ -198,6 +201,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesreply
 			}
 			return b
 		}(args.LeaderCommit, len(rf.log)-1)
+		rf.Cond.Broadcast()
 	}
 
 	return
@@ -332,7 +336,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	fmt.Println("start cmd ", command)
-	mcommand := reflect.ValueOf(command)
+	//mcommand := reflect.ValueOf(command)
 	if rf.state != leader {
 		return index, term, !isLeader
 	}
@@ -341,12 +345,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	fmt.Println("leader found!")
 	newEntry := new(Entry)
 	newEntry.Term = rf.currentTerm
-	newEntry.Command = mcommand
+	newEntry.Command = command
 	rf.mu.Lock()
-	rf.log = append(rf.log, *newEntry)
 	index = len(rf.log)
+	rf.log = append(rf.log, *newEntry)
 	term = rf.currentTerm
-	rf.Cond.Broadcast()
+	rf.eAppended<-true
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -400,6 +404,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.rpcCh = make(chan int)
 	rf.expire = make(chan bool)
 	rf.voteCh = make(chan bool)
+	rf.eAppended = make(chan bool)
 
 	go func(applyCh chan ApplyMsg) {
 		for {
@@ -498,8 +503,7 @@ func (rf *Raft) Run(timer int) {
 				fmt.Println("being a leader: ", rf.me)
 				rf.initLeader()
 				go rf.sendingHeartBeat()
-				//go rf.receivedAppendlogFromClient()
-				//go rf.serve()
+				go rf.serve()
 		}
 		<-rf.stateChange
 	}
@@ -513,19 +517,30 @@ func (rf *Raft) initLeader() {
 	}
 }
 
-func (rf *Raft) receivedAppendlogFromClient() {
+func (rf *Raft)check(i int) (bool, int){
+	fmt.Println("yangtao ", len(rf.log))
+	lastIndex := len(rf.log)-1
+	if lastIndex >= rf.nextIndex[i] {
+		return true, lastIndex
+	}
+	return false, -1
 }
 
 func (rf *Raft) serve() {
 	// for each follower, send AppendEnties if needed
-	for i,_ := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		if len(rf.log) >= rf.nextIndex[i] {
-			entries := make([]Entry, 0)
-			entries = rf.log[rf.nextIndex[i]:len(rf.log)]
-			rf.sendAppendEntriesToAll(entries)
+	for {
+		<-rf.eAppended
+		fmt.Println("yangtao New log append")
+		for i,_ := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			if ok, index := rf.check(i); ok {
+				entries := make([]Entry, 0)
+				entries = rf.log[rf.nextIndex[i]:index+1]
+				fmt.Println("send new log to followers ",entries[0].Command, len(entries))
+				rf.sendAppendEntriesToAll(entries)
+			}
 		}
 	}
 }
@@ -534,7 +549,7 @@ func (rf *Raft) sendingHeartBeat() {
 	state := leader
 	emptyEntry := make([]Entry,0)
 	for state == leader {
-		time.Sleep(time.Duration(20) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 		rf.mu.Lock()
 		state = rf.state
 		rf.mu.Unlock()	
@@ -562,19 +577,22 @@ func (rf *Raft) sendAppendEntriesToAll(e []Entry){
 			args.LeaderId = rf.me
 			args.PrevLogIndex = rf.nextIndex[serverid]-1
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-			args.Entries = make([]Entry, 0)
-			args.Entries = e[:]
+			args.Entries = make([]Entry, len(e))
+			copy(args.Entries, e)
 			args.LeaderCommit = rf.commitIndex
 			reply := new(AppendEntriesreply)
 			rf.mu.Unlock()
 
 			for {
+				fmt.Println("sending ", args, args.Entries,"index ", serverid)
 				res = rf.sendAppendEntries(serverid, args, reply)
 				fmt.Println("rpc res: ",res)
 				if res {
 					if reply.Success {
 						//fmt.Println("yangtao sending successfully")
 						success++
+						rf.nextIndex[serverid] = len(rf.log)
+						rf.matchIndex[serverid] = len(rf.log) + len(args.Entries) - 1
 						break
 					} else {
 						fmt.Println("yangtao reply fail")
@@ -584,15 +602,17 @@ func (rf *Raft) sendAppendEntriesToAll(e []Entry){
 							rf.state = follower
 							rf.stateChange<-true
 							rf.mu.Unlock()
-
-							break
-						} else if args.PrevLogIndex > 0{
-							args.PrevLogIndex--
-							args.Entries = rf.log[args.PrevLogIndex:rf.nextIndex[serverid]-1]
-						} else if args.PrevLogIndex == 0{
 							break
 						}
-						
+						if args.PrevLogIndex > 0 {
+							rf.mu.Lock()
+							rf.nextIndex[serverid]--
+							rf.mu.Unlock()
+							args.PrevLogIndex = rf.nextIndex[serverid]
+							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+						} else if args.PrevLogIndex == 0 {
+							break
+						}
 					}
 				} else {
 					fmt.Println("sending rpc fails to ", serverid)
@@ -650,13 +670,6 @@ func (rf *Raft) startVoteForSelf() {
 			} else {
 				fmt.Println("refused in voting")
 			}
-
-			/*mutex.Lock()
-			if votedSum == len(rf.peers)/2 && !happened {
-				happened = true
-				elected<-true
-			}
-			mutex.Unlock()*/
 		}(i)
 	}
 	wg.Wait()
